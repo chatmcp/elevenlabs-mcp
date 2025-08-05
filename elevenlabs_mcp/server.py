@@ -56,7 +56,7 @@ custom_client = httpx.Client(
 )
 
 client = ElevenLabs(api_key=api_key, httpx_client=custom_client)
-mcp = FastMCP("ElevenLabs")
+mcp = FastMCP("ElevenLabs", stateless_http=True)
 
 
 @mcp.tool(
