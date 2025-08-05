@@ -41,6 +41,10 @@ api_key = os.getenv("ELEVENLABS_API_KEY")
 base_path = os.getenv("ELEVENLABS_MCP_BASE_PATH")
 DEFAULT_VOICE_ID = os.getenv("ELEVENLABS_DEFAULT_VOICE_ID", "cgSgspJ2msm6clMCkdW9")
 
+mode = os.getenv("MODE", "rest")
+port = os.getenv("PORT", 9593)
+endpoint = os.getenv("ENDPOINT", "/rest")
+
 if not api_key:
     raise ValueError("ELEVENLABS_API_KEY environment variable is required")
 
@@ -1010,6 +1014,15 @@ def play_audio(input_file_path: str) -> TextContent:
 def main():
     print("Starting MCP server")
     """Run the MCP server"""
+
+    # streamable-http mode
+    if mode == "rest":
+        mcp.settings.port = port
+        mcp.settings.streamable_http_path = endpoint
+        mcp.run(transport="streamable-http")
+        
+        return
+    
     mcp.run()
 
 
