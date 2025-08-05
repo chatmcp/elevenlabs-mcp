@@ -1017,6 +1017,7 @@ def main():
 
     # streamable-http mode
     if mode == "rest":
+        mcp.settings.host = '0.0.0.0'
         mcp.settings.port = port
         mcp.settings.streamable_http_path = endpoint
         mcp.run(transport="streamable-http")

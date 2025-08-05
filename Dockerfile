@@ -12,5 +12,7 @@ COPY . .
 RUN pip install --upgrade pip \
     && pip install --no-cache-dir .
 
+EXPOSE 9593
+
 # Command to run the MCP server
 ENTRYPOINT ["elevenlabs-mcp"]
