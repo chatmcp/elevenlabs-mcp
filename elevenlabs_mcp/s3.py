@@ -45,6 +45,8 @@ def upload_to_s3(file_bytes, object_name, content_type):
     s3_client = get_s3_client()
 
     try:
+        prefix = os.getenv("S3_PREFIX", "")
+        object_name = prefix + object_name
         s3_client.put_object(
             Bucket=bucket_name,
             Key=object_name,
@@ -52,12 +54,12 @@ def upload_to_s3(file_bytes, object_name, content_type):
             ContentType=content_type,
         )
         endpoint_url = os.getenv("S3_ENDPOINT_URL")
-
-        # Construct the public URL
-        # Some S3 providers use a different URL structure for public access.
-        # This format is common, but might need adjustment for specific providers.
-        # For example, for minio it is http://<endpoint>/<bucket>/<object>
-        public_url = f"{endpoint_url}/{bucket_name}/{object_name}"
+        cdn_url = os.getenv("S3_CDN_URL")
+        public_url = (
+            f"{cdn_url}/{bucket_name}/{object_name}"
+            if cdn_url
+            else f"{endpoint_url}/{bucket_name}/{object_name}"
+        )
 
         return public_url
 
