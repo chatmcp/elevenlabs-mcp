@@ -56,9 +56,9 @@ def upload_to_s3(file_bytes, object_name, content_type):
         endpoint_url = os.getenv("S3_ENDPOINT_URL")
         cdn_url = os.getenv("S3_CDN_URL")
         public_url = (
-            f"{cdn_url}/{bucket_name}/{object_name}"
+            f"{cdn_url}/{object_name}"
             if cdn_url
-            else f"{endpoint_url}/{bucket_name}/{object_name}"
+            else f"{endpoint_url}/{object_name}"
         )
 
         return public_url
