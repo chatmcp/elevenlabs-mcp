@@ -21,19 +21,17 @@ from dotenv import load_dotenv
 from mcp.server.fastmcp import FastMCP
 from mcp.types import TextContent
 from elevenlabs.client import ElevenLabs
+import requests
 from elevenlabs_mcp.model import McpVoice, McpModel, McpLanguage
 from elevenlabs_mcp.utils import (
     make_error,
-    make_output_path,
-    make_output_file,
-    handle_input_file,
     parse_conversation_transcript,
     handle_large_text,
 )
+from elevenlabs_mcp.s3 import upload_to_s3
 from elevenlabs_mcp.convai import create_conversation_config, create_platform_settings
 from elevenlabs.types.knowledge_base_locator import KnowledgeBaseLocator
 
-from elevenlabs import play
 from elevenlabs_mcp import __version__
 
 load_dotenv()
@@ -60,8 +58,7 @@ mcp = FastMCP("ElevenLabs", stateless_http=True)
 
 
 @mcp.tool(
-    description="""Convert text to speech with a given voice and save the output audio file to a given directory.
-    Directory is optional, if not provided, the output file will be saved to $HOME/Desktop.
+    description="""Convert text to speech with a given voice and uploads the output audio file to S3.
     Only one of voice_id or voice_name can be provided. If none are provided, the default voice will be used.
 
     ⚠️ COST WARNING: This tool makes an API call to ElevenLabs which may incur costs. Only use when explicitly requested by the user.
@@ -82,8 +79,6 @@ mcp = FastMCP("ElevenLabs", stateless_http=True)
         style (float, optional): Style of the generated audio. Determines the style exaggeration of the voice. This setting attempts to amplify the style of the original speaker. It does consume additional computational resources and might increase latency if set to anything other than 0. Range is 0 to 1.
         use_speaker_boost (bool, optional): Use speaker boost of the generated audio. This setting boosts the similarity to the original speaker. Using this setting requires a slightly higher computational load, which in turn increases latency.
         speed (float, optional): Speed of the generated audio. Controls the speed of the generated speech. Values range from 0.7 to 1.2, with 1.0 being the default speed. Lower values create slower, more deliberate speech while higher values produce faster-paced speech. Extreme values can impact the quality of the generated speech. Range is 0.7 to 1.2.
-        output_directory (str, optional): Directory where files should be saved.
-            Defaults to $HOME/Desktop if not provided.
         language: ISO 639-1 language code for the voice.
         output_format (str, optional): Output format of the generated audio. Formatted as codec_sample_rate_bitrate. So an mp3 with 22.05kHz sample rate at 32kbs is represented as mp3_22050_32. MP3 with 192kbps bitrate requires you to be subscribed to Creator tier or above. PCM with 44.1kHz sample rate requires you to be subscribed to Pro tier or above. Note that the μ-law format (sometimes written mu-law, often approximated as u-law) is commonly used for Twilio audio inputs.
             Defaults to "mp3_44100_128". Must be one of:
@@ -107,13 +102,12 @@ mcp = FastMCP("ElevenLabs", stateless_http=True)
             opus_48000_192
 
     Returns:
-        Text content with the path to the output file and name of the voice used.
+        Text content with the URL to the output file and name of the voice used.
     """
 )
 def text_to_speech(
     text: str,
     voice_name: str | None = None,
-    output_directory: str | None = None,
     voice_id: str | None = None,
     stability: float = 0.5,
     similarity_boost: float = 0.75,
@@ -143,8 +137,8 @@ def text_to_speech(
 
     voice_id = voice.voice_id if voice else DEFAULT_VOICE_ID
 
-    output_path = make_output_path(output_directory, base_path)
-    output_file_name = make_output_file("tts", text, output_path, "mp3")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_file_name = f"tts_{timestamp}.mp3"
 
     if model_id is None:
         model_id = (
@@ -168,18 +162,16 @@ def text_to_speech(
     )
     audio_bytes = b"".join(audio_data)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(output_path / output_file_name, "wb") as f:
-        f.write(audio_bytes)
+    file_url = upload_to_s3(audio_bytes, output_file_name, "audio/mpeg")
 
     return TextContent(
         type="text",
-        text=f"Success. File saved as: {output_path / output_file_name}. Voice used: {voice.name if voice else DEFAULT_VOICE_ID}",
+        text=f"Success. File uploaded to: {file_url}. Voice used: {voice.name if voice else DEFAULT_VOICE_ID}",
     )
 
 
 @mcp.tool(
-    description="""Transcribe speech from an audio file and either save the output text file to a given directory or return the text to the client directly.
+    description="""Transcribe speech from an audio file and either upload the output text file to S3 or return the text to the client directly.
 
     ⚠️ COST WARNING: This tool makes an API call to ElevenLabs which may incur costs. Only use when explicitly requested by the user.
 
@@ -189,29 +181,22 @@ def text_to_speech(
         diarize: Whether to diarize the audio file. If True, which speaker is currently speaking will be annotated in the transcription.
         save_transcript_to_file: Whether to save the transcript to a file.
         return_transcript_to_client_directly: Whether to return the transcript to the client directly.
-        output_directory: Directory where files should be saved.
-            Defaults to $HOME/Desktop if not provided.
 
     Returns:
-        TextContent containing the transcription. If save_transcript_to_file is True, the transcription will be saved to a file in the output directory.
+        TextContent containing the transcription. If save_transcript_to_file is True, the transcription will be uploaded to S3 and the URL will be returned.
     """
 )
 def speech_to_text(
-    input_file_path: str,
+    input_file_url: str,
     language_code: str | None = None,
     diarize: bool = False,
     save_transcript_to_file: bool = True,
     return_transcript_to_client_directly: bool = False,
-    output_directory: str | None = None,
 ) -> TextContent:
     if not save_transcript_to_file and not return_transcript_to_client_directly:
         make_error("Must save transcript to file or return it to the client directly.")
-    file_path = handle_input_file(input_file_path)
-    if save_transcript_to_file:
-        output_path = make_output_path(output_directory, base_path)
-        output_file_name = make_output_file("stt", file_path.name, output_path, "txt")
-    with file_path.open("rb") as f:
-        audio_bytes = f.read()
+
+    audio_bytes = requests.get(input_file_url).content
     transcription = client.speech_to_text.convert(
         model_id="scribe_v1",
         file=audio_bytes,
@@ -222,20 +207,20 @@ def speech_to_text(
     )
 
     if save_transcript_to_file:
-        with open(output_path / output_file_name, "w") as f:
-            f.write(transcription.text)
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_file_name = f"stt_{timestamp}.txt"
+        file_url = upload_to_s3(
+            transcription.text.encode("utf-8"), output_file_name, "text/plain"
+        )
 
     if return_transcript_to_client_directly:
         return TextContent(type="text", text=transcription.text)
     else:
-        return TextContent(
-            type="text", text=f"Transcription saved to {output_path / output_file_name}"
-        )
+        return TextContent(type="text", text=f"Transcription uploaded to {file_url}")
 
 
 @mcp.tool(
-    description="""Convert text description of a sound effect to sound effect with a given duration and save the output audio file to a given directory.
-    Directory is optional, if not provided, the output file will be saved to $HOME/Desktop.
+    description="""Convert text description of a sound effect to sound effect with a given duration and uploads the output audio file to S3.
     Duration must be between 0.5 and 5 seconds.
 
     ⚠️ COST WARNING: This tool makes an API call to ElevenLabs which may incur costs. Only use when explicitly requested by the user.
@@ -243,8 +228,6 @@ def speech_to_text(
     Args:
         text: Text description of the sound effect
         duration_seconds: Duration of the sound effect in seconds
-        output_directory: Directory where files should be saved.
-            Defaults to $HOME/Desktop if not provided.
         output_format (str, optional): Output format of the generated audio. Formatted as codec_sample_rate_bitrate. So an mp3 with 22.05kHz sample rate at 32kbs is represented as mp3_22050_32. MP3 with 192kbps bitrate requires you to be subscribed to Creator tier or above. PCM with 44.1kHz sample rate requires you to be subscribed to Pro tier or above. Note that the μ-law format (sometimes written mu-law, often approximated as u-law) is commonly used for Twilio audio inputs.
             Defaults to "mp3_44100_128". Must be one of:
             mp3_22050_32
@@ -270,13 +253,12 @@ def speech_to_text(
 def text_to_sound_effects(
     text: str,
     duration_seconds: float = 2.0,
-    output_directory: str | None = None,
     output_format: str = "mp3_44100_128",
 ) -> list[TextContent]:
     if duration_seconds < 0.5 or duration_seconds > 5:
         make_error("Duration must be between 0.5 and 5 seconds")
-    output_path = make_output_path(output_directory, base_path)
-    output_file_name = make_output_file("sfx", text, output_path, "mp3")
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_file_name = f"sfx_{timestamp}.mp3"
 
     audio_data = client.text_to_sound_effects.convert(
         text=text,
@@ -285,12 +267,11 @@ def text_to_sound_effects(
     )
     audio_bytes = b"".join(audio_data)
 
-    with open(output_path / output_file_name, "wb") as f:
-        f.write(audio_bytes)
+    file_url = upload_to_s3(audio_bytes, output_file_name, "audio/mpeg")
 
     return TextContent(
         type="text",
-        text=f"Success. File saved as: {output_path / output_file_name}",
+        text=f"Success. File uploaded to: {file_url}",
     )
 
 
@@ -359,7 +340,7 @@ def get_voice(voice_id: str) -> McpVoice:
 def voice_clone(
     name: str, files: list[str], description: str | None = None
 ) -> TextContent:
-    input_files = [str(handle_input_file(file).absolute()) for file in files]
+    input_files = [str(requests.get(file_url).absolute()) for file_url in files]
     voice = client.voices.ivc.create(
         name=name, description=description, files=input_files
     )
@@ -374,31 +355,27 @@ def voice_clone(
 
 
 @mcp.tool(
-    description="""Isolate audio from a file and save the output audio file to a given directory.
-    Directory is optional, if not provided, the output file will be saved to $HOME/Desktop.
+    description="""Isolate audio from a file and uploads the output audio file to S3.
 
     ⚠️ COST WARNING: This tool makes an API call to ElevenLabs which may incur costs. Only use when explicitly requested by the user.
     """
 )
 def isolate_audio(
-    input_file_path: str, output_directory: str | None = None
+    input_file_url: str,
 ) -> list[TextContent]:
-    file_path = handle_input_file(input_file_path)
-    output_path = make_output_path(output_directory, base_path)
-    output_file_name = make_output_file("iso", file_path.name, output_path, "mp3")
-    with file_path.open("rb") as f:
-        audio_bytes = f.read()
+    audio_bytes = requests.get(input_file_url).content
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_file_name = f"iso_{timestamp}.mp3"
     audio_data = client.audio_isolation.convert(
         audio=audio_bytes,
     )
     audio_bytes = b"".join(audio_data)
 
-    with open(output_path / output_file_name, "wb") as f:
-        f.write(audio_bytes)
+    file_url = upload_to_s3(audio_bytes, output_file_name, "audio/mpeg")
 
     return TextContent(
         type="text",
-        text=f"Success. File saved as: {output_path / output_file_name}",
+        text=f"Success. File uploaded to: {file_url}",
     )
 
 
@@ -505,11 +482,11 @@ def add_knowledge_base_to_agent(
     agent_id: str,
     knowledge_base_name: str,
     url: str | None = None,
-    input_file_path: str | None = None,
+    input_file_url: str | None = None,
     text: str | None = None,
 ) -> TextContent:
     provided_params = [
-        param for param in [url, input_file_path, text] if param is not None
+        param for param in [url, input_file_url, text] if param is not None
     ]
     if len(provided_params) == 0:
         make_error("Must provide either a URL, a file, or text")
@@ -528,11 +505,11 @@ def add_knowledge_base_to_agent(
             text_io.name = "text.txt"
             text_io.content_type = "text/plain"
             file = text_io
-        elif input_file_path is not None:
-            path = handle_input_file(
-                file_path=input_file_path, audio_content_check=False
-            )
-            file = open(path, "rb")
+        elif input_file_url is not None:
+            audio_bytes = requests.get(input_file_url).content
+            file = BytesIO(audio_bytes)
+            file.name = "audio.wav"
+            file.content_type = "audio/wav"
 
         response = client.conversational_ai.knowledge_base.documents.create_from_file(
             name=knowledge_base_name,
@@ -743,9 +720,8 @@ Call Successful: {conv.call_successful}"""
     """
 )
 def speech_to_speech(
-    input_file_path: str,
+    input_file_url: str,
     voice_name: str = "Adam",
-    output_directory: str | None = None,
 ) -> TextContent:
     voices = client.voices.search(search=voice_name)
 
@@ -758,12 +734,9 @@ def speech_to_speech(
         make_error(f"Voice with name: {voice_name} does not exist.")
 
     assert voice is not None  # Type assertion for type checker
-    file_path = handle_input_file(input_file_path)
-    output_path = make_output_path(output_directory, base_path)
-    output_file_name = make_output_file("sts", file_path.name, output_path, "mp3")
-
-    with file_path.open("rb") as f:
-        audio_bytes = f.read()
+    audio_bytes = requests.get(input_file_url).content
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    output_file_name = f"sts_{timestamp}.mp3"
 
     audio_data = client.speech_to_speech.convert(
         model_id="eleven_multilingual_sts_v2",
@@ -773,16 +746,13 @@ def speech_to_speech(
 
     audio_bytes = b"".join(audio_data)
 
-    with open(output_path / output_file_name, "wb") as f:
-        f.write(audio_bytes)
+    file_url = upload_to_s3(audio_bytes, output_file_name, "audio/mpeg")
 
-    return TextContent(
-        type="text", text=f"Success. File saved as: {output_path / output_file_name}"
-    )
+    return TextContent(type="text", text=f"Success. File uploaded to: {file_url}")
 
 
 @mcp.tool(
-    description="""Create voice previews from a text prompt. Creates three previews with slight variations. Saves the previews to a given directory. If no text is provided, the tool will auto-generate text.
+    description="""Create voice previews from a text prompt. Creates three previews with slight variations. Uploads the previews to S3. If no text is provided, the tool will auto-generate text.
 
     Voice preview files are saved as: voice_design_(generated_voice_id)_(timestamp).mp3
 
@@ -794,7 +764,6 @@ def speech_to_speech(
 def text_to_voice(
     voice_description: str,
     text: str | None = None,
-    output_directory: str | None = None,
 ) -> TextContent:
     if voice_description == "":
         make_error("Voice description is required.")
@@ -805,25 +774,21 @@ def text_to_voice(
         auto_generate_text=True if text is None else False,
     )
 
-    output_path = make_output_path(output_directory, base_path)
-
     generated_voice_ids = []
-    output_file_paths = []
+    output_file_urls = []
 
     for preview in previews.previews:
-        output_file_name = make_output_file(
-            "voice_design", preview.generated_voice_id, output_path, "mp3", full_id=True
-        )
-        output_file_paths.append(str(output_file_name))
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        output_file_name = f"voice_design_{preview.generated_voice_id}_{timestamp}.mp3"
         generated_voice_ids.append(preview.generated_voice_id)
         audio_bytes = base64.b64decode(preview.audio_base_64)
 
-        with open(output_path / output_file_name, "wb") as f:
-            f.write(audio_bytes)
+        file_url = upload_to_s3(audio_bytes, output_file_name, "audio/mpeg")
+        output_file_urls.append(file_url)
 
     return TextContent(
         type="text",
-        text=f"Success. Files saved at: {', '.join(output_file_paths)}. Generated voice IDs are: {', '.join(generated_voice_ids)}",
+        text=f"Success. Files uploaded to: {', '.join(output_file_urls)}. Generated voice IDs are: {', '.join(generated_voice_ids)}",
     )
 
 
@@ -1002,13 +967,6 @@ def list_phone_numbers() -> TextContent:
 
     formatted_info = "\n\n".join(phone_info)
     return TextContent(type="text", text=f"Phone Numbers:\n\n{formatted_info}")
-
-
-@mcp.tool(description="Play an audio file. Supports WAV and MP3 formats.")
-def play_audio(input_file_path: str) -> TextContent:
-    file_path = handle_input_file(input_file_path)
-    play(open(file_path, "rb").read(), use_ffmpeg=False)
-    return TextContent(type="text", text=f"Successfully played audio file: {file_path}")
 
 
 def main():
